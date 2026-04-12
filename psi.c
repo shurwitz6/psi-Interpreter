@@ -302,16 +302,32 @@ pval* parse_list(char* input, int* idx) {
   pval* list = pval_list();
   (*idx)++;
   while (input[*idx] != ')') {
+    // unclosed list
     if (input[*idx] == '\0') {
-      // avoid memory leak
       pval_delete(list);
       return pval_error(pval_symbol("incomplete-parse"));
     }
     pval* elem = pval_parse(input, idx);
+    // invalid token inside list
+    if (!elem || elem->type == PVAL_ERROR) {
+      pval_delete(list);
+      return elem ? elem : pval_error(pval_symbol("incomplete-parse"));
+    }
     pval_list_add(list, elem);
   }
   (*idx)++;
   return list;
+}
+
+pval* parse_quote(char* input, int* idx) {
+  (*idx)++;
+  pval* inner = pval_parse(input, idx);
+  if (!inner)
+    return pval_error(pval_symbol("incomplete-parse"));
+  pval* quoted = pval_list();
+  pval_list_add(quoted, pval_symbol("quote"));
+  pval_list_add(quoted, inner);
+  return quoted;
 }
 
 // Reads one complete token at a time, returns a PSI value
@@ -330,6 +346,8 @@ pval* pval_parse(char* input, int* idx) {
     return parse_list(input, idx);
   else if (input[*idx] == '\0')
     return NULL;
+  else if (input[*idx] == '\'')
+    return parse_quote(input, idx);
   else
     return pval_error(pval_symbol("invalid-token"));
 }
@@ -423,7 +441,73 @@ pval* builtin_eq(pval* args) {
   return pval_bool(true);
 }
 
+pval* builtin_tail(pval* args) {
+  res_array* d = (res_array*)args->data;
+  if (d->size != 1)
+    return pval_error(pval_symbol("arity-error"));
+  if (d->items[0]->type != PVAL_LIST)
+    return pval_error(pval_symbol("type-error"));
+  res_array* inner = (res_array*)d->items[0]->data;
+  if (inner->size == 0)
+    return pval_error(pval_symbol("value-error"));
+  pval* result = pval_list();
+  for (int i = 1; i < inner->size; i++) {
+    pval_list_add(result, pval_copy(inner->items[i]));
+  }
+  return result;
+}
+
+pval* builtin_cons(pval* args) {
+  res_array* d = (res_array*)args->data;
+  if (d->size != 2)
+    return pval_error(pval_symbol("arity-error"));
+  if (d->items[1]->type != PVAL_LIST)
+    return pval_error(pval_symbol("type-error"));
+  pval* result = pval_list();
+  pval_list_add(result, pval_copy(d->items[0]));
+  res_array* tail = (res_array*)d->items[1]->data;
+  for (int i = 0; i < tail->size; i++) {
+    pval_list_add(result, pval_copy(tail->items[i]));
+  }
+  return result;
+}
+
+pval* builtin_head(pval* args) {
+  res_array* d = (res_array*)args->data;
+  if (d->size != 1)
+    return pval_error(pval_symbol("arity-error"));
+  if (d->items[0]->type != PVAL_LIST)
+    return pval_error(pval_symbol("type-error"));
+  res_array* inner = (res_array*)d->items[0]->data;
+  if (inner->size == 0)
+    return pval_error(pval_symbol("value-error"));
+  return pval_copy(inner->items[0]);
+}
+
+pval* builtin_type(pval* args) {
+  res_array* d = (res_array*)args->data;
+  if (d->size != 1)
+    return pval_error(pval_symbol("arity-error"));
+  switch (d->items[0]->type) {
+  case PVAL_NUMBER:
+    return pval_symbol("number");
+  case PVAL_BOOL:
+    return pval_symbol("bool");
+  case PVAL_SYMBOL:
+    return pval_symbol("symbol");
+  case PVAL_LIST:
+    return pval_symbol("list");
+  case PVAL_FUNCTION:
+    return pval_symbol("function");
+  case PVAL_ERROR:
+    return pval_symbol("error");
+  default:
+    return pval_error(pval_symbol("unknown-type"));
+  }
+}
+
 pval* builtin_quit(pval* args) { exit(0); }
+
 //------------------------- env helpers -------------------------
 void env_free(env* e) {
   if (!e)
@@ -469,15 +553,15 @@ void env_bind(env* e, pval* key, pval* val) {
 }
 
 env* env_init(fpval* builtins, int size) {
-    env* e = env_new(NULL);
-    for (int i = 0; i < size; i++) {
-        pval* key = pval_symbol(builtins[i].name);
-        pval* val = pval_function(builtins[i].name, builtins[i].func);
-        env_bind(e, key, val);
-        pval_delete(key);
-        pval_delete(val);
-    }
-    return e;
+  env* e = env_new(NULL);
+  for (int i = 0; i < size; i++) {
+    pval* key = pval_symbol(builtins[i].name);
+    pval* val = pval_function(builtins[i].name, builtins[i].func);
+    env_bind(e, key, val);
+    pval_delete(key);
+    pval_delete(val);
+  }
+  return e;
 }
 
 //---------------------evaluator helpers----------------------
@@ -505,6 +589,27 @@ pval* psi_apply(pval* func, pval* args) {
 }
 
 //------------------------evaluator----------------------------
+typedef enum { SF_NONE, SF_IF, SF_DEF, SF_QUOTE } special_form;
+
+special_form get_special_form(pval* list) {
+  res_array* d = (res_array*)list->data;
+  if (d->size == 0 || d->items[0]->type != PVAL_SYMBOL)
+    return SF_NONE;
+  char* head = (char*)d->items[0]->data;
+  if (strcmp(head, "if") == 0)
+    return SF_IF;
+  else if (strcmp(head, "def") == 0)
+    return SF_DEF;
+  else if (strcmp(head, "quote") == 0)
+    return SF_QUOTE;
+  return SF_NONE;
+}
+
+// forward declaration
+pval* eval_if(pval* list, env* e);
+pval* eval_def(pval* list, env* e);
+pval* eval_quote(pval* list, env* e);
+
 pval* psi_eval(pval* pv, env* e) {
   switch (pv->type) {
   case PVAL_NUMBER:
@@ -516,17 +621,39 @@ pval* psi_eval(pval* pv, env* e) {
     return env_lookup(e, pv);
   case PVAL_LIST: {
     res_array* d = (res_array*)pv->data;
+    // empty list
     if (d->size == 0)
       return pval_copy(pv);
+
+    // special forms
+    special_form sf = get_special_form(pv);
+    if (sf != SF_NONE) {
+      switch (sf) {
+      case SF_IF:
+        return eval_if(pv, e);
+      case SF_DEF:
+        return eval_def(pv, e);
+      case SF_QUOTE:
+        return eval_quote(pv, e);
+      default:
+        break;
+      }
+    }
+
+    // evaluate all elements
     pval* args = psi_eval_list(pv, e);
     if (args->type == PVAL_ERROR)
       return args;
+
+    // split function from args
     pval* func = pval_copy(((res_array*)args->data)->items[0]);
     pval* args1 = pval_list();
     for (int i = 1; i < ((res_array*)args->data)->size; i++) {
       pval_list_add(args1, pval_copy(((res_array*)args->data)->items[i]));
     }
     pval_delete(args);
+
+    // apply and return
     pval* result = psi_apply(func, args1);
     pval_delete(func);
     pval_delete(args1);
@@ -543,12 +670,17 @@ void psi_repl(env* e) {
     char input[4096];
     printf("psi> ");
     fflush(stdout);
-    fgets(input, 4096, stdin);
+    // printf("debug: parsing\n");
+    if (!fgets(input, 4096, stdin))
+      break;
     int idx = 0;
     pval* pv = pval_parse(input, &idx);
+    // printf("debug: parsed\n");
     if (!pv)
       continue;
+    // printf("debug: evaluating\n");
     pval* result = psi_eval(pv, e);
+    // printf("debug: evaluated\n");
     pval_print(result);
     printf("\n");
     pval_delete(pv);
@@ -556,13 +688,53 @@ void psi_repl(env* e) {
   }
 }
 
-//-------------------------- main -----------------------------
-fpval global_env[] = {{"+", builtin_add}, {"-", builtin_sub},
-                      {"*", builtin_mul}, {"/", builtin_div},
-                      {"=", builtin_eq},  {"quit", builtin_quit}};
-int global_env_size = 6;
+//---------------------special forms---------------------------
+pval* eval_if(pval* list, env* e) {
+  res_array* d = (res_array*)list->data;
+  if (d->size < 3 || d->size > 4)
+    return pval_error(pval_symbol("arity-error"));
+  pval* cond = psi_eval(d->items[1], e);
+  if (cond->type == PVAL_ERROR)
+    return cond;
+  bool is_false = (cond->type == PVAL_BOOL && !*((bool*)cond->data));
+  pval_delete(cond);
+  if (is_false)
+    // PSI Spec: "In the arity-2 case, behaves as if else-form were given as
+    // #f."
+    return (d->size == 4) ? psi_eval(d->items[3], e) : pval_bool(false);
+  return psi_eval(d->items[2], e);
+}
 
-int main() { 
-    env* e = env_init(global_env, global_env_size);
-    psi_repl(e);
- }
+pval* eval_def(pval* list, env* e) {
+  res_array* d = (res_array*)list->data;
+  if (d->size != 3)
+    return pval_error(pval_symbol("arity-error"));
+  if (d->items[1]->type != PVAL_SYMBOL)
+    return pval_error(pval_symbol("type-error"));
+  pval* val = psi_eval(d->items[2], e);
+  if (val->type == PVAL_ERROR)
+    return val;
+  env_bind(e, d->items[1], val);
+  return val;
+}
+
+pval* eval_quote(pval* list, env* e) {
+  res_array* d = (res_array*)list->data;
+  if (d->size != 2)
+    return pval_error(pval_symbol("arity-error"));
+  return pval_copy(d->items[1]);
+}
+
+//-------------------------- main -----------------------------
+fpval global_env[] = {
+    {"+", builtin_add},     {"-", builtin_sub},     {"*", builtin_mul},
+    {"/", builtin_div},     {"=", builtin_eq},      {"quit", builtin_quit},
+    {"cons", builtin_cons}, {"head", builtin_head}, {"tail", builtin_tail},
+    {"type", builtin_type},
+};
+int global_env_size = 10;
+
+int main() {
+  env* e = env_init(global_env, global_env_size);
+  psi_repl(e);
+}
