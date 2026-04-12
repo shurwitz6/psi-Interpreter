@@ -7,6 +7,7 @@
 #include <string.h>
 
 // ------------------ basic types ------------------------
+// PSI value types
 typedef enum {
   PVAL_NUMBER,
   PVAL_BOOL,
@@ -16,22 +17,26 @@ typedef enum {
   PVAL_ERROR
 } pval_type;
 
+// A PSI value
 typedef struct pval {
   pval_type type;
   void* data;
 } pval;
 
+// Resizable array of pval*
 typedef struct {
   pval** items;
   int size;
   int capacity;
 } res_array;
 
+// Builtin functions only - Stores a name and a C function pointer
 typedef struct {
   char* name;
   pval* (*func)(pval*);
 } fpval;
 
+// Environment — maps keys to values, with parent for environment chaining
 typedef struct env {
   pval** keys;
   pval** values;
@@ -41,6 +46,7 @@ typedef struct env {
 } env;
 
 // --------------- constructors ---------------------
+// Creates a PSI number value from a 64-bit signed integer
 pval* pval_number(int64_t n) {
   int64_t* d = malloc(sizeof(int64_t));
   assert(d);
@@ -52,6 +58,7 @@ pval* pval_number(int64_t n) {
   return pv;
 }
 
+// Creates a PSI boolean value (#t or #f)
 pval* pval_bool(bool b) {
   bool* d = malloc(sizeof(bool));
   assert(d);
@@ -63,6 +70,7 @@ pval* pval_bool(bool b) {
   return pv;
 }
 
+// Creates a PSI symbol value from a C string
 pval* pval_symbol(char* s) {
   char* d = malloc(strlen(s) + 1);
   assert(d);
@@ -74,6 +82,7 @@ pval* pval_symbol(char* s) {
   return pv;
 }
 
+// Creates an empty, resizable PSI list 
 pval* pval_list() {
   res_array* d = malloc(sizeof(res_array));
   assert(d);
@@ -88,6 +97,7 @@ pval* pval_list() {
   return pv;
 }
 
+// Creates a PSI error value
 pval* pval_error(pval* error) {
   pval* pv = malloc(sizeof(pval));
   assert(pv);
@@ -96,6 +106,7 @@ pval* pval_error(pval* error) {
   return pv;
 }
 
+// Creates a PSI builtin function value
 pval* pval_function(char* name, pval* (*func)(pval*)) {
   fpval* d = malloc(sizeof(fpval));
   assert(d);
@@ -110,6 +121,7 @@ pval* pval_function(char* name, pval* (*func)(pval*)) {
   return pv;
 }
 
+// Creates a new environment
 env* env_new(env* parent) {
   env* e = malloc(sizeof(env));
   assert(e);
@@ -123,7 +135,15 @@ env* env_new(env* parent) {
   return e;
 }
 
+//------------------ forward declarations -------------------
+pval* pval_parse(char* input, int* idx);
+pval* psi_eval(pval* pv, env* e);
+pval* eval_if(pval* list, env* e);
+pval* eval_def(pval* list, env* e);
+pval* eval_quote(pval* list, env* e);
+
 //-------------------- pval helpers --------------------------------
+// Frees pval memory
 void pval_delete(pval* pv) {
   if (!pv)
     return;
@@ -169,6 +189,7 @@ void pval_delete(pval* pv) {
   }
 }
 
+// Prints a pval
 void pval_print(pval* pv) {
   switch (pv->type) {
   case PVAL_NUMBER:
@@ -210,6 +231,7 @@ void pval_print(pval* pv) {
   }
 }
 
+// Appends a pval to a list
 void pval_list_add(pval* list, pval* elem) {
   res_array* d = (res_array*)list->data;
   if (d->size == d->capacity) {
@@ -221,6 +243,7 @@ void pval_list_add(pval* list, pval* elem) {
   d->size += 1;
 }
 
+// Deep copies a pval
 pval* pval_copy(pval* pv) {
   if (!pv)
     return pval_error(pval_symbol("null-copy"));
@@ -251,9 +274,7 @@ pval* pval_copy(pval* pv) {
 }
 
 //------------------------ parser ----------------------------
-// forward declaration
-pval* pval_parse(char* input, int* idx);
-
+// Reads signed integer from input
 pval* parse_number(char* input, int* idx) {
   int j = 0;
   char buf[32];
@@ -273,6 +294,7 @@ pval* parse_number(char* input, int* idx) {
   return pval_number(n);
 }
 
+// Reads symbol from input
 pval* parse_symbol(char* input, int* idx) {
   int j = 0;
   char buf[64];
@@ -286,6 +308,7 @@ pval* parse_symbol(char* input, int* idx) {
   return pval_symbol(buf);
 }
 
+// Reads boolean from input
 pval* parse_bool(char* input, int* idx) {
   if (input[*idx + 1] == 't') {
     (*idx) += 2;
@@ -298,6 +321,7 @@ pval* parse_bool(char* input, int* idx) {
   }
 }
 
+// Reads list from input
 pval* parse_list(char* input, int* idx) {
   pval* list = pval_list();
   (*idx)++;
@@ -319,6 +343,8 @@ pval* parse_list(char* input, int* idx) {
   return list;
 }
 
+// Handles shorthand quote ' — wraps next pval in (quote <pval>)
+// PSI Spec: 'x is shorthand for (quote x)
 pval* parse_quote(char* input, int* idx) {
   (*idx)++;
   pval* inner = pval_parse(input, idx);
@@ -330,7 +356,7 @@ pval* parse_quote(char* input, int* idx) {
   return quoted;
 }
 
-// Reads one complete token at a time, returns a PSI value
+// Main parser entry point — dispatches to type-specific helpers
 pval* pval_parse(char* input, int* idx) {
   // handle multiple whitespaces
   while (isspace(input[*idx]))
@@ -353,6 +379,7 @@ pval* pval_parse(char* input, int* idx) {
 }
 
 //------------------------ built in functions ----------------------------
+// Returns sum 
 pval* builtin_add(pval* args) {
   int64_t sum = 0;
   res_array* d = (res_array*)args->data;
@@ -365,6 +392,7 @@ pval* builtin_add(pval* args) {
   return pval_number(sum);
 }
 
+// Flips sign (arity 1) or returns difference (arity 2+)
 pval* builtin_sub(pval* args) {
   res_array* d = (res_array*)args->data;
   if (d->size == 0)
@@ -383,6 +411,7 @@ pval* builtin_sub(pval* args) {
   return pval_number(diff);
 }
 
+// Returns product
 pval* builtin_mul(pval* args) {
   int64_t prod = 1;
   res_array* d = (res_array*)args->data;
@@ -395,6 +424,7 @@ pval* builtin_mul(pval* args) {
   return pval_number(prod);
 }
 
+// Returns quotient
 pval* builtin_div(pval* args) {
   res_array* d = (res_array*)args->data;
   if (d->size < 2)
@@ -412,6 +442,7 @@ pval* builtin_div(pval* args) {
   return pval_number(quot);
 }
 
+// Returns #t if all arguments are equal
 pval* builtin_eq(pval* args) {
   res_array* d = (res_array*)args->data;
   if (d->size <= 1)
@@ -441,6 +472,7 @@ pval* builtin_eq(pval* args) {
   return pval_bool(true);
 }
 
+// Returns everything except the first element
 pval* builtin_tail(pval* args) {
   res_array* d = (res_array*)args->data;
   if (d->size != 1)
@@ -457,6 +489,7 @@ pval* builtin_tail(pval* args) {
   return result;
 }
 
+// Prepends a value to a list
 pval* builtin_cons(pval* args) {
   res_array* d = (res_array*)args->data;
   if (d->size != 2)
@@ -472,6 +505,7 @@ pval* builtin_cons(pval* args) {
   return result;
 }
 
+// Returns the first element of a list
 pval* builtin_head(pval* args) {
   res_array* d = (res_array*)args->data;
   if (d->size != 1)
@@ -484,6 +518,7 @@ pval* builtin_head(pval* args) {
   return pval_copy(inner->items[0]);
 }
 
+// Returns the type 
 pval* builtin_type(pval* args) {
   res_array* d = (res_array*)args->data;
   if (d->size != 1)
@@ -506,9 +541,11 @@ pval* builtin_type(pval* args) {
   }
 }
 
+// Exits with return code 0
 pval* builtin_quit(pval* args) { exit(0); }
 
 //------------------------- env helpers -------------------------
+// Frees all memory owned by environment
 void env_free(env* e) {
   if (!e)
     return;
@@ -521,7 +558,7 @@ void env_free(env* e) {
   free(e);
 }
 
-// percolates up thru parent envs until val is found or unbound
+// Looks up a symbol in the environment chain
 pval* env_lookup(env* e, pval* key) {
   if (!e)
     return pval_error(pval_symbol("unbound"));
@@ -533,7 +570,7 @@ pval* env_lookup(env* e, pval* key) {
   return env_lookup(e->parent, key);
 }
 
-// updates or adds val to env
+// Adds or updates a key-value to the environment
 void env_bind(env* e, pval* key, pval* val) {
   for (int i = 0; i < e->size; i++) {
     if (strcmp((char*)e->keys[i]->data, (char*)key->data) == 0) {
@@ -552,6 +589,7 @@ void env_bind(env* e, pval* key, pval* val) {
   e->size++;
 }
 
+// Creates a global environment from the builtin function table
 env* env_init(fpval* builtins, int size) {
   env* e = env_new(NULL);
   for (int i = 0; i < size; i++) {
@@ -565,8 +603,7 @@ env* env_init(fpval* builtins, int size) {
 }
 
 //---------------------evaluator helpers----------------------
-// forward declaration
-pval* psi_eval(pval* pv, env* e);
+// Evaluates each element of a list
 pval* psi_eval_list(pval* list, env* e) {
   res_array* d = (res_array*)list->data;
   pval* args = pval_list();
@@ -581,6 +618,7 @@ pval* psi_eval_list(pval* list, env* e) {
   return args;
 }
 
+// Applies a function pval to a list
 pval* psi_apply(pval* func, pval* args) {
   if (func->type != PVAL_FUNCTION)
     return pval_error(pval_symbol("inapplicable-head"));
@@ -589,8 +627,10 @@ pval* psi_apply(pval* func, pval* args) {
 }
 
 //------------------------evaluator----------------------------
+// Applies a function pval to an argument list
 typedef enum { SF_NONE, SF_IF, SF_DEF, SF_QUOTE } special_form;
 
+// Identifies if the list head is a s.f.
 special_form get_special_form(pval* list) {
   res_array* d = (res_array*)list->data;
   if (d->size == 0 || d->items[0]->type != PVAL_SYMBOL)
@@ -605,11 +645,7 @@ special_form get_special_form(pval* list) {
   return SF_NONE;
 }
 
-// forward declaration
-pval* eval_if(pval* list, env* e);
-pval* eval_def(pval* list, env* e);
-pval* eval_quote(pval* list, env* e);
-
+// Main evaluator — dispatches on pval type
 pval* psi_eval(pval* pv, env* e) {
   switch (pv->type) {
   case PVAL_NUMBER:
@@ -665,6 +701,7 @@ pval* psi_eval(pval* pv, env* e) {
 }
 
 //----------------------repl loop------------------------------
+// Main interpreter loop 
 void psi_repl(env* e) {
   while (1) {
     char input[4096];
@@ -689,6 +726,7 @@ void psi_repl(env* e) {
 }
 
 //---------------------special forms---------------------------
+// Evaluates condition and the matching branch
 pval* eval_if(pval* list, env* e) {
   res_array* d = (res_array*)list->data;
   if (d->size < 3 || d->size > 4)
@@ -696,6 +734,7 @@ pval* eval_if(pval* list, env* e) {
   pval* cond = psi_eval(d->items[1], e);
   if (cond->type == PVAL_ERROR)
     return cond;
+  // PSI Spec: only #f is falsy; all other values are truthy
   bool is_false = (cond->type == PVAL_BOOL && !*((bool*)cond->data));
   pval_delete(cond);
   if (is_false)
@@ -705,6 +744,7 @@ pval* eval_if(pval* list, env* e) {
   return psi_eval(d->items[2], e);
 }
 
+// Evaluates expression and binds result to glob env
 pval* eval_def(pval* list, env* e) {
   res_array* d = (res_array*)list->data;
   if (d->size != 3)
@@ -718,6 +758,8 @@ pval* eval_def(pval* list, env* e) {
   return val;
 }
 
+// Returns argument unevaluated 
+// (quote x) --> x, (quote (+ 1 2)) --> (+ 1 2)
 pval* eval_quote(pval* list, env* e) {
   res_array* d = (res_array*)list->data;
   if (d->size != 2)
@@ -726,6 +768,7 @@ pval* eval_quote(pval* list, env* e) {
 }
 
 //-------------------------- main -----------------------------
+// Global builtin functions — loaded on startup
 fpval global_env[] = {
     {"+", builtin_add},     {"-", builtin_sub},     {"*", builtin_mul},
     {"/", builtin_div},     {"=", builtin_eq},      {"quit", builtin_quit},
@@ -734,6 +777,7 @@ fpval global_env[] = {
 };
 int global_env_size = 10;
 
+// Entry point
 int main() {
   env* e = env_init(global_env, global_env_size);
   psi_repl(e);
