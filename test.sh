@@ -18,6 +18,7 @@
 (if 0 1 2)
 (if () 4)
 (if 0 1 b)
+(if 1 2 (quit))
 a
 (def a (= #t 4))
 a
